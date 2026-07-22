@@ -696,7 +696,7 @@ class MyHandler(events.PatternMatchingEventHandler):
             scheduler.scheduler.get_job('walk_watchdir').pause()
         failed = 0
         name2 = ''
-        if event.event_type == 'created' and event.is_directory is False:
+        if event.event_type in ('created', 'closed') and event.is_directory is False:
             gevent.sleep(10)
             watchdir_file = event.src_path
             if not os.path.isfile(watchdir_file):
@@ -818,6 +818,9 @@ class MyHandler(events.PatternMatchingEventHandler):
             if cfg.watchdir_walk_enabled:
                 scheduler.scheduler.get_job('walk_watchdir').resume()
     def on_created(self, event):
+        self.process(event)
+
+    def on_closed(self, event):
         self.process(event)
 
 
