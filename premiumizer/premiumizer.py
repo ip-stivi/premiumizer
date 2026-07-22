@@ -1666,14 +1666,21 @@ def download_task(task):
                 else:
                     task.update(eta='Seeding', speed='', dlsize='', local_status='finished_seeding', progress=99)
             elif cfg.remove_cloud_delay != 0 and task.type != 'Filehost':
+                # delete_at is persisted on the task itself (see DownloadTask.py) so it
+                # survives a process restart. The APScheduler job below still exists to
+                # actually fire the deletion at the right time, but it lives in an
+                # in-memory jobstore (see add_jobstore('memory', alias='remove_cloud'))
+                # and is lost on restart -- delete_at is the real source of truth for
+                # "when should this be deleted", used by parse_tasks()'s
+                # finished_waiting branch and by reschedule_remove_cloud_jobs() on
+                # startup, instead of depending on this job's next_run_time.
+                delete_at = datetime.now() + timedelta(hours=cfg.remove_cloud_delay)
                 scheduler.scheduler.add_job(delete_task, args=(task.id,), name=task.name, id=task.name,
                                             misfire_grace_time=7200, coalesce=False, jobstore='remove_cloud',
-                                            replace_existing=True,
-                                            next_run_time=(datetime.now() + timedelta(hours=cfg.remove_cloud_delay)))
-                time = (scheduler.scheduler.get_job(task.name).next_run_time.replace(tzinfo=None) - datetime.now())
-                time = str(time).split('.', 2)[0]
+                                            replace_existing=True, next_run_time=delete_at)
+                time = str(delete_at - datetime.now()).split('.', 2)[0]
                 task.update(eta='Deleting from the cloud in' + time, speed='', dlsize='',
-                            local_status='finished_waiting', progress=99)
+                            local_status='finished_waiting', progress=99, delete_at=delete_at)
             else:
                 delete_task(task.id)
     else:
@@ -1908,12 +1915,34 @@ def parse_tasks(transfers):
                 else:
                     task.update(name=name, cloud_status=transfer['status'], eta=eta)
             elif task.local_status == 'finished_waiting':
-                try:
-                    time = (scheduler.scheduler.get_job(task.name).next_run_time.replace(tzinfo=None) - datetime.now())
-                    time = str(time).split('.', 2)[0]
-                    task.update(name=name, cloud_status=transfer['status'], eta='Deleting from cloud in: ' + time)
-                except:
-                    delete_task(task.id)
+                # Use the persisted delete_at timestamp as the source of truth for
+                # "when should this be deleted" rather than the remove_cloud
+                # scheduler job's next_run_time. That job lives in an in-memory-only
+                # jobstore (add_jobstore('memory', alias='remove_cloud')), so it does
+                # not survive a process restart -- previously, get_job(task.name)
+                # returning None after a restart fell into the bare except below and
+                # deleted the cloud item immediately, ignoring whatever remove_cloud_delay
+                # window was left (upstream issue #249).
+                if task.delete_at is not None:
+                    remaining = task.delete_at - datetime.now()
+                    if remaining.total_seconds() <= 0:
+                        delete_task(task.id)
+                    else:
+                        time = str(remaining).split('.', 2)[0]
+                        task.update(name=name, cloud_status=transfer['status'],
+                                    eta='Deleting from cloud in: ' + time)
+                else:
+                    # Backward compatibility: task was already in finished_waiting
+                    # when this fix was deployed, so it has no persisted delete_at
+                    # (old database.db entries predate this field). Fall back to the
+                    # previous scheduler-job-based check for this one-time migration
+                    # window instead of crashing.
+                    try:
+                        time = (scheduler.scheduler.get_job(task.name).next_run_time.replace(tzinfo=None) - datetime.now())
+                        time = str(time).split('.', 2)[0]
+                        task.update(name=name, cloud_status=transfer['status'], eta='Deleting from cloud in: ' + time)
+                    except:
+                        delete_task(task.id)
             task.update(name=name, cloud_status=transfer['status'], folder_id=folder_id, file_id=file_id)
         id_online.append(task.id)
         task.callback = None
@@ -2189,6 +2218,35 @@ def load_tasks():
     for task in tasks:
         if task.local_status == 'downloading' or task.local_status == 'queued':
             task.update(local_status=None)
+
+
+def reschedule_remove_cloud_jobs():
+    # remove_cloud jobs live in an in-memory-only APScheduler jobstore
+    # (add_jobstore('memory', alias='remove_cloud')), so any job pending at the
+    # moment of a restart is gone once the scheduler comes back up. task.delete_at
+    # (persisted alongside the task in database.db, see download_task()) is the
+    # real source of truth for "when should this be deleted" -- re-create the
+    # scheduler job from it here for every task still waiting on cloud removal, so
+    # a restart doesn't just leave them stuck in finished_waiting forever. Must run
+    # after the scheduler is started and the remove_cloud jobstore exists, so it is
+    # called from the startup block below rather than from load_tasks() (which runs
+    # before the scheduler is created).
+    for task in tasks:
+        if task.local_status == 'finished_waiting':
+            delete_at = task.delete_at
+            if delete_at is None:
+                # Task was already finished_waiting before this fix was deployed --
+                # no persisted timestamp to reschedule from. Leave it; parse_tasks()'s
+                # finished_waiting branch falls back gracefully for this task.
+                continue
+            if delete_at <= datetime.now():
+                logger.info('remove_cloud delay already elapsed while app was offline for: %s', task.name)
+                delete_task(task.id)
+            else:
+                scheduler.scheduler.add_job(delete_task, args=(task.id,), name=task.name, id=task.name,
+                                            misfire_grace_time=7200, coalesce=False, jobstore='remove_cloud',
+                                            replace_existing=True, next_run_time=delete_at)
+                logger.debug('Rescheduled remove_cloud job for: %s -- at: %s', task.name, delete_at)
 
 
 def watchdir():
@@ -2803,6 +2861,7 @@ if __name__ == '__main__':
         scheduler.scheduler.add_jobstore('memory', alias='reupload')
         scheduler.scheduler.add_executor('threadpool', alias='downloads', max_workers=cfg.download_max)
         scheduler.start()
+        reschedule_remove_cloud_jobs()
         scheduler.scheduler.add_job(update, 'interval', id='update',
                                     seconds=active_interval, replace_existing=True, max_instances=1, coalesce=True)
         if not os_arg == '--docker':

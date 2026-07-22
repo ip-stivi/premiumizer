@@ -2,6 +2,13 @@ import time
 
 
 class DownloadTask:
+    # Class-level default so tasks unpickled from a database.db written before this
+    # field existed (shelve stores/restores __dict__ directly, bypassing __init__)
+    # fall back to None instead of raising AttributeError when task.delete_at is
+    # read -- see premiumizer.py's finished_waiting handling and
+    # reschedule_remove_cloud_jobs().
+    delete_at = None
+
     def __init__(self, callback, id, folder_id, size, name, category, dldir, dlext, dlext_blacklist, delsample, dlnzbtomedia, type):
         self.progress = None
         self.speed = None
@@ -28,6 +35,12 @@ class DownloadTask:
         self.dlsize = ''
         self.type = type
         self.download_list = []
+        # Persisted target timestamp for remove_cloud cleanup. This is the source
+        # of truth for "when should this be deleted" -- the APScheduler
+        # remove_cloud job that also targets this deletion lives in an in-memory
+        # jobstore and does not survive a process restart, but this field does
+        # (it is stored on the task object, which is pickled into database.db).
+        self.delete_at = None
 
     def update(self, **kwargs):
         self.previous_timestamp = self.timestamp
@@ -48,6 +61,8 @@ class DownloadTask:
             self.speed = kwargs.get('speed')
         if 'eta' in kwargs:
             self.eta = kwargs.get('eta')
+        if 'delete_at' in kwargs:
+            self.delete_at = kwargs.get('delete_at')
         if 'category' in kwargs:
             self.category = kwargs.get('category')
         if 'dldir' in kwargs:
