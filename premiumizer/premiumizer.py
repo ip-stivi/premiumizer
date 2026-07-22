@@ -1113,6 +1113,23 @@ def jd_query_packages(id=None):
     return jd_packages['packages']
 
 
+def jd_name_normalize(name):
+    # JDownloader's own cleanuppackagenames/cleanupfilenames settings can alter the
+    # package name we told it to use (stripping brackets/release-group tags,
+    # collapsing whitespace, re-casing, etc.), so a strict substring/equality check
+    # against the exact name we uploaded is fragile. Normalize both sides down to a
+    # lowercase alnum-only string before comparing so those cosmetic changes don't
+    # cause a false "package not found" -> FAILED status.
+    return re.sub(r'[^a-z0-9]', '', (name or '').lower())
+
+
+def jd_name_matches(jd_name, package_name):
+    normalized_jd_name = jd_name_normalize(jd_name)
+    if not normalized_jd_name:
+        return False
+    return normalized_jd_name in jd_name_normalize(package_name)
+
+
 def get_download_stats_jd(package_name, package_ids):
     count = 0
     eta_status = ''
@@ -1130,7 +1147,7 @@ def get_download_stats_jd(package_name, package_ids):
     query_packages = jd_query_packages(package_ids)
     if not query_packages:
         return 1
-    while not any(package['name'] in package_name for package in query_packages):
+    while not any(jd_name_matches(package['name'], package_name) for package in query_packages):
         gevent.sleep(5)
         query_packages = jd_query_packages(package_ids)
         count += 1
@@ -1178,7 +1195,7 @@ def get_download_stats_jd(package_name, package_ids):
         if task_total_progress == 100:
             continue
         for count, package in enumerate(query_packages):
-            if package['name'] in package_name:
+            if jd_name_matches(package['name'], package_name):
                 if str(package['uuid']) not in package_ids:
                     package_ids.append(str(package['uuid']))
                 try:
