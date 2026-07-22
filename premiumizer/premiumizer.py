@@ -852,6 +852,7 @@ prem_session = requests.Session()
 last_email = {'time': datetime.now() - timedelta(days=1), 'subject': ""}
 jd_packages = {'time': datetime.now(), 'packages': []}
 watchdog_handler = MyHandler()
+watchdog_observer = None
 
 
 #
@@ -2174,12 +2175,27 @@ def load_tasks():
 
 
 def watchdir():
+    global watchdog_handler, watchdog_observer
+    # If a watchdog Observer from a previous call is still around (e.g. this is a
+    # settings-triggered re-init, not a fresh process), stop and join it first.
+    # Otherwise the old Observer thread is orphaned: it keeps running, still holds
+    # its inotify watch, and the new Observer/handler wiring silently races it
+    # instead of cleanly replacing it.
+    if watchdog_observer is not None:
+        try:
+            if watchdog_observer.is_alive():
+                logger.debug('Stopping previous watchdog observer before reinitializing')
+                watchdog_observer.stop()
+                watchdog_observer.join()
+        except Exception as e:
+            logger.error('Could not stop previous watchdog observer: %s', e)
+        watchdog_observer = None
     try:
-        global watchdog_handler
         logger.debug('Initializing watchdog')
         observer = Observer()
         observer.schedule(watchdog_handler, path=cfg.watchdir_location, recursive=True)
         observer.start()
+        watchdog_observer = observer
         logger.debug('Initializing watchdog complete')
         if cfg.watchdir_walk_enabled:
             scheduler.scheduler.add_job(walk_watchdir, 'interval', id='walk_watchdir', seconds=active_interval,
@@ -2187,7 +2203,14 @@ def watchdir():
         else:
             walk_watchdir()
 
-    except:
+    except Exception as e:
+        # watchdir() normally runs inside a gevent.spawn_later() greenlet with no
+        # error callback attached, so an uncaught exception here is never seen by
+        # the app's own logger/uncaught_exception hook -- it is silently swallowed
+        # by gevent's default greenlet error handling. Log it explicitly so a
+        # failed (re)init is actually visible instead of leaving the watcher dead
+        # with no trace in premiumizer.log/premiumizerDEBUG.log.
+        logger.error('Could not initialize watchdog observer: %s', e)
         raise
 
 
