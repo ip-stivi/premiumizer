@@ -1136,11 +1136,7 @@ def jd_name_matches(jd_name, package_name):
 def get_download_stats_jd(package_name, package_ids):
     count = 0
     eta_status = ''
-    total_speed = []
-    total_eta = []
-    total_progress = []
-    total_bytesloaded = []
-    total_bytestotal = []
+    total_stats = {}
     task_total_speed = 0
     task_total_eta = ''
     task_total_progress = 0
@@ -1165,14 +1161,14 @@ def get_download_stats_jd(package_name, package_ids):
         task_total_bytesloaded = 0
         task_total_bytestotal = 0
 
-        for x in range(len(total_bytestotal)):
-            task_total_bytestotal += total_bytestotal[x]
+        for stats in total_stats.values():
+            task_total_bytestotal += stats['bytestotal']
             try:
-                task_total_speed += total_speed[x]
-                if not total_eta[x] == 'Finished':
-                    task_total_eta = total_eta[x]
-                task_total_progress += total_progress[x]
-                task_total_bytesloaded += total_bytesloaded[x]
+                task_total_speed += stats['speed']
+                if not stats['eta'] == 'Finished':
+                    task_total_eta = stats['eta']
+                task_total_progress += stats['progress']
+                task_total_bytesloaded += stats['bytesloaded']
 
             except:
                 pass
@@ -1197,7 +1193,7 @@ def get_download_stats_jd(package_name, package_ids):
         eta_status = ''
         if task_total_progress == 100:
             continue
-        for count, package in enumerate(query_packages):
+        for package in query_packages:
             if jd_name_matches(package['name'], package_name):
                 if str(package['uuid']) not in package_ids:
                     package_ids.append(str(package['uuid']))
@@ -1205,10 +1201,10 @@ def get_download_stats_jd(package_name, package_ids):
                     x = package['status']
                 except:
                     if package['bytesLoaded'] == 0:
-                        try:
-                            total_bytestotal[count] = package["bytesTotal"]
-                        except:
-                            total_bytestotal.append(package["bytesTotal"])
+                        existing = total_stats.setdefault(str(package['uuid']), {
+                            'speed': 0, 'eta': '', 'progress': 0, 'bytesloaded': 0, 'bytestotal': 0,
+                        })
+                        existing['bytestotal'] = package["bytesTotal"]
                         continue
                     logger.error('JDownloader did not return package[status]')
                     return 1
@@ -1270,18 +1266,13 @@ def get_download_stats_jd(package_name, package_ids):
                     tmp_total_progress = 100
                 else:
                     tmp_total_progress = round(float(package['bytesLoaded']) * 100 / package["bytesTotal"], 1)
-                try:
-                    total_speed[count] = speed
-                    total_eta[count] = eta
-                    total_progress[count] = tmp_total_progress
-                    total_bytesloaded[count] = package['bytesLoaded']
-                    total_bytestotal[count] = bytestotal
-                except:
-                    total_speed.append(speed)
-                    total_eta.append(eta)
-                    total_progress.append(tmp_total_progress)
-                    total_bytesloaded.append(package['bytesLoaded'])
-                    total_bytestotal.append(bytestotal)
+                total_stats[str(package['uuid'])] = {
+                    'speed': speed,
+                    'eta': eta,
+                    'progress': tmp_total_progress,
+                    'bytesloaded': package['bytesLoaded'],
+                    'bytestotal': bytestotal,
+                }
             try:
                 while 'Extracting' in package['status']:
                     try:
